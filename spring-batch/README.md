@@ -643,9 +643,103 @@ mybatis:
                SELECT ... LIMIT 5 OFFSET 15  → Chunk #4
 ```
 
-## 5. 남은 학습 주제
+## 5. Job Parameter
 
-- [ ] **Job Parameter 활용** - 실행 시 조건값을 외부에서 전달 (예: targetDate)
+실행 시점에 외부에서 조건값을 전달하는 기능이다.
+
+### 왜 필요한가
+
+Processor의 조건이 코드에 하드코딩되어 있으면 조건을 바꿀 때마다 코드를 수정하고 재빌드해야 한다.
+
+```bash
+# 오늘은 잔액 100,000 이상
+java -jar batch.jar minBalance=100000
+
+# 내일은 잔액 500,000 이상
+java -jar batch.jar minBalance=500000
+```
+
+### 중복 실행 방지
+
+Spring Batch는 같은 Job + 같은 Parameter 조합은 중복 실행을 거부한다. 메타 테이블에 이미 COMPLETED로 기록되어 있기 때문이다.
+
+```
+java -jar batch.jar targetDate=2026-03-13  → 첫 실행 → COMPLETED
+java -jar batch.jar targetDate=2026-03-13  → 거부 (이미 COMPLETED)
+java -jar batch.jar targetDate=2026-03-14  → 새로운 실행 → OK
+```
+
+같은 파라미터로 재실행이 필요하면 `RunIdIncrementer`를 사용한다:
+
+```kotlin
+jobBuilderFactory.get("accountJob")
+    .incrementer(RunIdIncrementer())  // 실행할 때마다 run.id가 자동 증가
+    .start(accountStep())
+    .build()
+```
+
+### 설정 방법
+
+**1. `@StepScope` + `@Value`로 파라미터 주입**
+
+```kotlin
+@Bean
+@StepScope
+fun accountProcessor(
+    @Value("#{jobParameters['minBalance']}") minBalance: Long,
+): ItemProcessor<Account, Account> =
+    ItemProcessor { account ->
+        if (account.status == "ACTIVE" && account.balance >= minBalance) {
+            account
+        } else {
+            null
+        }
+    }
+```
+
+- `@StepScope`: Bean 생성 시점을 Step 실행 시로 지연. 이래야 `jobParameters`를 읽을 수 있음
+- `#{jobParameters['minBalance']}`: SpEL 표현식으로 Job Parameter에서 값을 꺼냄
+
+**2. `@StepScope` Bean을 Step에서 주입받기**
+
+`@StepScope` Bean은 생성 시 jobParameters가 필요하므로, 직접 메서드 호출 대신 Bean 주입 방식을 사용해야 한다.
+
+```kotlin
+// 컴파일 에러 - accountProcessor()에 minBalance 인자가 필요
+.processor(accountProcessor())
+
+// 정상 - Spring이 @StepScope Bean을 알아서 주입
+fun accountStep(
+    sqlSessionFactory: SqlSessionFactory,
+    accountProcessor: ItemProcessor<Account, Account>,
+): Step =
+    stepBuilderFactory.get("accountStep")
+        ...
+        .processor(accountProcessor)
+        ...
+```
+
+**3. 실행 시 파라미터 전달**
+
+```bash
+./gradlew bootRun --args='minBalance=500000'
+```
+
+### 실행 결과 (minBalance=500000)
+
+```
+이전 (minBalance=100,000 하드코딩): 9건 통과
+지금 (minBalance=500,000 파라미터): 3건 통과 (+ Hank 1건 스킵)
+
+통과한 계정 (balance >= 500,000):
+  Diana    780,000
+  Hank   1,200,000  → API 실패 시뮬레이션으로 스킵
+  Karen    540,000
+  Paul     890,000
+```
+
+## 6. 남은 학습 주제
+
 - [ ] **다중 Step 구성** - 하나의 Job에 여러 Step을 순차/조건부 실행
 - [ ] **Listener** - Job/Step/Chunk 실행 전후에 로직 끼워넣기
 - [ ] **실무 적용** - 실제 비즈니스 DB + 외부 API 연동

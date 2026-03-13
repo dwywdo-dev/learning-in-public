@@ -9,8 +9,10 @@ import org.springframework.batch.core.Job
 import org.springframework.batch.core.Step
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory
+import org.springframework.batch.core.configuration.annotation.StepScope
 import org.springframework.batch.item.ItemProcessor
 import org.springframework.batch.item.ItemWriter
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 
@@ -28,9 +30,12 @@ class AccountJobConfig(
             .build()
 
     @Bean
-    fun accountProcessor(): ItemProcessor<Account, Account> =
+    @StepScope
+    fun accountProcessor(
+        @Value("#{jobParameters['minBalance']}") minBalance: Long,
+    ): ItemProcessor<Account, Account> =
         ItemProcessor { account ->
-            if (account.status == "ACTIVE" && account.balance >= 100_000) {
+            if (account.status == "ACTIVE" && account.balance >= minBalance) {
                 account
             } else {
                 null
@@ -54,13 +59,17 @@ class AccountJobConfig(
     }
 
     @Bean
-    fun accountStep(sqlSessionFactory: SqlSessionFactory): Step =
+    fun accountStep(
+        accountReader: MyBatisPagingItemReader<Account>,
+        accountProcessor: ItemProcessor<Account, Account>,
+        accountWriter: ItemWriter<Account>,
+    ): Step =
         stepBuilderFactory
             .get("accountStep")
             .chunk<Account, Account>(5)
-            .reader(accountReader(sqlSessionFactory))
-            .processor(accountProcessor())
-            .writer(accountWriter())
+            .reader(accountReader)
+            .processor(accountProcessor)
+            .writer(accountWriter)
             .faultTolerant()
             .retry(ApiCallException::class.java)
             .retryLimit(3)
@@ -69,9 +78,9 @@ class AccountJobConfig(
             .build()
 
     @Bean
-    fun accountJob(sqlSessionFactory: SqlSessionFactory): Job =
+    fun accountJob(accountStep: Step): Job =
         jobBuilderFactory
             .get("accountJob")
-            .start(accountStep(sqlSessionFactory))
+            .start(accountStep)
             .build()
 }
