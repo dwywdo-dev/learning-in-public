@@ -126,6 +126,54 @@ fun batchDataSource(): DataSource { ... }
 fun businessDataSource(): DataSource { ... }
 ```
 
+### 메타 테이블은 필수인가?
+
+**필수이다.** Spring Batch는 메타 테이블 없이 동작하지 않는다. `JobRepository`가 Job 실행 상태를 메타 테이블에 기록하고 읽는 것이 핵심 설계이다.
+
+메타 테이블 저장소 옵션:
+
+| 방식 | 특징 |
+|---|---|
+| 실제 DB (MySQL, PostgreSQL 등) | 실무 표준. 이력이 영구 보존 |
+| H2 인메모리 (학습용) | 앱 종료 시 데이터 소멸 |
+| Map 기반 인메모리 (`MapJobRepositoryFactoryBean`) | 메타 테이블 없이 메모리에만 저장. 테스트 전용 |
+
+### H2 인메모리 사용 시 동작하는 기능 / 안 하는 기능
+
+핵심 구분은 **"실행 중"인지 "실행 간"인지**이다.
+
+**실행 중 (H2에서도 정상 동작):**
+
+| 기능 | 이유 |
+|---|---|
+| Retry/Skip | chunk 처리 중 메모리 + 현재 트랜잭션 내에서 동작 |
+| Chunk 트랜잭션 관리 | 현재 실행의 DB 트랜잭션 |
+| Step 실행 순서 제어 | 현재 Job 실행 컨텍스트 내에서 결정 |
+| Listener 호출 | 현재 실행의 이벤트 |
+| READ_COUNT, WRITE_COUNT 등 집계 | 현재 실행의 STEP_EXECUTION에 기록 |
+
+**실행 간 (H2 인메모리에서는 동작하지 않음):**
+
+| 기능 | 이유 |
+|---|---|
+| 같은 Parameter 중복 실행 방지 | 이전 실행 이력이 앱 종료 시 소멸 |
+| 실패 지점부터 재시작 | 이전 실행에서 어디까지 처리했는지 기록이 없음 |
+| 실행 이력 조회 | 앱 종료 시 모두 사라짐 |
+
+```
+실패 지점 재시작 예시:
+
+영속 DB (MySQL 등):
+  1차 실행: Chunk #1~#47 성공, #48 실패 → FAILED 기록
+  2차 실행: 메타 테이블 확인 → Chunk #48부터 재시작
+
+H2 인메모리:
+  1차 실행: Chunk #1~#47 성공, #48 실패 → FAILED 기록 → 앱 종료 → 소멸
+  2차 실행: 이전 기록 없음 → Chunk #1부터 다시 시작
+```
+
+H2 인메모리에서 안 되는 것은 "이전 실행을 기억해야 하는 기능" 뿐이다. 학습 단계에서는 문제없고, 실무에서 영속 DB로 전환하면 자동으로 활성화된다.
+
 ## 2. Chunk 기반 Job
 
 Tasklet이 "하나의 작업을 통째로 실행"하는 방식이라면, Chunk는 "데이터를 일정 단위로 나눠서 파이프라인으로 처리"하는 방식이다.
@@ -517,9 +565,86 @@ Thread-2: read() lock 획득 → OFFSET 5 LIMIT 5 → lock 해제
 
 대량 데이터에서 Paging 방식이 권장되는 이유: 커넥션 점유 문제 + Multi-threaded Step 호환.
 
-## 4. 남은 학습 주제
+## 4. MyBatisPagingItemReader 전환
 
-- [ ] **MyBatisPagingItemReader 전환** - 기존 MyBatis Mapper를 활용한 페이징 Reader
+`JdbcCursorItemReader`에서 `MyBatisPagingItemReader`로 전환했다.
+
+### 전환 이유
+
+| | JdbcCursorItemReader (이전) | MyBatisPagingItemReader (전환 후) |
+|---|---|---|
+| thread-safety | X → Multi-threaded Step 불가 | O → Multi-threaded Step 가능 |
+| 커넥션 점유 | Step 전체 동안 | chunk 사이에 반환 |
+| SQL 관리 | Kotlin 코드에 직접 작성 | MyBatis Mapper XML로 분리 |
+| 기존 Mapper 활용 | 불가 | 가능 |
+
+### 구성 파일
+
+**1. Mapper 인터페이스** (`mapper/AccountMapper.kt`)
+
+```kotlin
+@Mapper
+interface AccountMapper {
+    fun findTargetAccounts(params: Map<String, Any>): List<Account>
+}
+```
+
+**2. Mapper XML** (`resources/mapper/AccountMapper.xml`)
+
+```xml
+<mapper namespace="com.example.batch.mapper.AccountMapper">
+    <select id="findTargetAccounts" resultType="com.example.batch.domain.Account">
+        SELECT account_id, name, status, balance, created_at
+        FROM accounts
+        ORDER BY account_id
+        LIMIT #{_pagesize} OFFSET #{_skiprows}
+    </select>
+</mapper>
+```
+
+- `#{_skiprows}`, `#{_pagesize}`는 Spring Batch가 자동으로 주입하는 페이징 파라미터
+- WHERE 절, JOIN 등 자유롭게 추가 가능
+
+**3. Reader Bean** (`AccountJobConfig.kt`)
+
+```kotlin
+@Bean
+fun accountReader(sqlSessionFactory: SqlSessionFactory): MyBatisPagingItemReader<Account> =
+    MyBatisPagingItemReaderBuilder<Account>()
+        .sqlSessionFactory(sqlSessionFactory)
+        .queryId("com.example.batch.mapper.AccountMapper.findTargetAccounts")
+        .pageSize(5)
+        .build()
+```
+
+- `sqlSessionFactory`는 `mybatis-spring-boot-starter`가 자동 등록한 Bean
+- `.queryId()`는 Mapper XML의 namespace + select id
+- `.pageSize()`는 chunk-size와 동일하게 설정하는 것이 일반적
+
+**4. application.yml MyBatis 설정**
+
+```yaml
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  configuration:
+    map-underscore-to-camel-case: true    # account_id → accountId 자동 매핑
+```
+
+### 내부 동작 차이
+
+결과는 동일하지만 DB 접근 방식이 다르다:
+
+```
+이전 (Cursor): SELECT ... FROM accounts (커서 1번 열고 계속 fetch)
+
+지금 (Paging): SELECT ... LIMIT 5 OFFSET 0   → Chunk #1
+               SELECT ... LIMIT 5 OFFSET 5   → Chunk #2
+               SELECT ... LIMIT 5 OFFSET 10  → Chunk #3
+               SELECT ... LIMIT 5 OFFSET 15  → Chunk #4
+```
+
+## 5. 남은 학습 주제
+
 - [ ] **Job Parameter 활용** - 실행 시 조건값을 외부에서 전달 (예: targetDate)
 - [ ] **다중 Step 구성** - 하나의 Job에 여러 Step을 순차/조건부 실행
 - [ ] **Listener** - Job/Step/Chunk 실행 전후에 로직 끼워넣기

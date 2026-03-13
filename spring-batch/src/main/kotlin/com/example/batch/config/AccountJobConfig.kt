@@ -2,39 +2,30 @@ package com.example.batch.config
 
 import com.example.batch.domain.Account
 import com.example.batch.exception.ApiCallException
+import org.apache.ibatis.session.SqlSessionFactory
+import org.mybatis.spring.batch.MyBatisPagingItemReader
+import org.mybatis.spring.batch.builder.MyBatisPagingItemReaderBuilder
 import org.springframework.batch.core.Job
 import org.springframework.batch.core.Step
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory
 import org.springframework.batch.item.ItemProcessor
 import org.springframework.batch.item.ItemWriter
-import org.springframework.batch.item.database.JdbcCursorItemReader
-import org.springframework.batch.item.database.builder.JdbcCursorItemReaderBuilder
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import javax.sql.DataSource
 
 @Configuration
 class AccountJobConfig(
     private val jobBuilderFactory: JobBuilderFactory,
     private val stepBuilderFactory: StepBuilderFactory,
-    private val dataSource: DataSource,
 ) {
     @Bean
-    fun accountReader(): JdbcCursorItemReader<Account> =
-        JdbcCursorItemReaderBuilder<Account>()
-            .name("accountReader")
-            .dataSource(dataSource)
-            .sql("SELECT account_id, name, status, balance, created_at FROM accounts ORDER BY account_id")
-            .rowMapper { rs, _ ->
-                Account(
-                    accountId = rs.getLong("account_id"),
-                    name = rs.getString("name"),
-                    status = rs.getString("status"),
-                    balance = rs.getLong("balance"),
-                    createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
-                )
-            }.build()
+    fun accountReader(sqlSessionFactory: SqlSessionFactory): MyBatisPagingItemReader<Account> =
+        MyBatisPagingItemReaderBuilder<Account>()
+            .sqlSessionFactory(sqlSessionFactory)
+            .queryId("com.example.batch.mapper.AccountMapper.findTargetAccounts")
+            .pageSize(5)
+            .build()
 
     @Bean
     fun accountProcessor(): ItemProcessor<Account, Account> =
@@ -63,11 +54,11 @@ class AccountJobConfig(
     }
 
     @Bean
-    fun accountStep(): Step =
+    fun accountStep(sqlSessionFactory: SqlSessionFactory): Step =
         stepBuilderFactory
             .get("accountStep")
             .chunk<Account, Account>(5)
-            .reader(accountReader())
+            .reader(accountReader(sqlSessionFactory))
             .processor(accountProcessor())
             .writer(accountWriter())
             .faultTolerant()
@@ -78,9 +69,9 @@ class AccountJobConfig(
             .build()
 
     @Bean
-    fun accountJob(): Job =
+    fun accountJob(sqlSessionFactory: SqlSessionFactory): Job =
         jobBuilderFactory
             .get("accountJob")
-            .start(accountStep())
+            .start(accountStep(sqlSessionFactory))
             .build()
 }
