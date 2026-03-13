@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# IntelliJ IDEA
+.idea/
+
+# Gradle
+.gradle/
+build/
+
+# Compiled class files
+*.class
+
+# Log files
+*.log
+
+# Package files
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
