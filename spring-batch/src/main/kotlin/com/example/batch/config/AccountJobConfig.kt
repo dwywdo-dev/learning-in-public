@@ -2,6 +2,7 @@ package com.example.batch.config
 
 import com.example.batch.domain.Account
 import com.example.batch.exception.ApiCallException
+import com.example.batch.listener.AccountStepResultListener
 import com.example.batch.listener.JobLoggingListener
 import com.example.batch.listener.SkipLoggingListener
 import org.apache.ibatis.session.SqlSessionFactory
@@ -78,6 +79,7 @@ class AccountJobConfig(
     ): Step =
         stepBuilderFactory
             .get("accountStep")
+            .listener(AccountStepResultListener())
             .chunk<Account, Account>(5)
             .reader(accountReader)
             .processor(accountProcessor)
@@ -94,8 +96,11 @@ class AccountJobConfig(
     fun reportStep(): Step =
         stepBuilderFactory
             .get("reportStep")
-            .tasklet { _, _ ->
-                println("[ReportStep] Finished Batch!")
+            .tasklet { _, chunkContext ->
+                val jobContext = chunkContext.stepContext.stepExecution.jobExecution.executionContext
+                val processedCount = jobContext.getLong("processedCount", 0)
+                val skipCount = jobContext.getLong("skipCount", 0)
+                println("[ReportStep] Finished Batch! Processed: $processedCount Skipped: $skipCount ")
                 RepeatStatus.FINISHED
             }.build()
 

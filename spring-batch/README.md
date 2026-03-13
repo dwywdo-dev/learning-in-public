@@ -912,11 +912,129 @@ stepBuilderFactory.get("accountStep")       → StepBuilder
 | `StepExecutionListener` | `.chunk()` 앞의 `.listener(...)` |
 | `SkipListener` | `.faultTolerant()` 이후의 `.listener(...)` |
 
-## 8. 남은 학습 주제
+## 8. ExecutionContext
+
+Step 간에 데이터를 전달하기 위한 key-value 저장소이다. 메타 테이블(`BATCH_STEP_EXECUTION_CONTEXT`, `BATCH_JOB_EXECUTION_CONTEXT`)에 직렬화되어 저장된다.
+
+### 두 가지 스코프
+
+```
+JobExecution
+├── ExecutionContext (Job 레벨) ← 모든 Step에서 공유
+│
+├── StepExecution: initStep
+│   └── ExecutionContext (Step 레벨) ← 이 Step 안에서만 유효
+│
+├── StepExecution: accountStep
+│   └── ExecutionContext (Step 레벨)
+│
+└── StepExecution: reportStep
+    └── ExecutionContext (Step 레벨)
+```
+
+| 스코프 | 접근 방법 | 공유 범위 |
+|---|---|---|
+| Step ExecutionContext | `stepExecution.executionContext` | 해당 Step 내부에서만 |
+| Job ExecutionContext | `stepExecution.jobExecution.executionContext` | 같은 Job의 모든 Step에서 |
+
+Step 간 데이터 전달이 목적이면 반드시 **Job ExecutionContext**를 사용해야 한다. Step ExecutionContext에 넣으면 다른 Step에서 읽을 수 없다.
+
+### 접근 방법
+
+ExecutionContext에 접근하려면 `StepExecution` 객체가 필요하다.
+
+**1. StepExecutionListener에서 접근**
+
+```kotlin
+class AccountStepResultListener : StepExecutionListener {
+    override fun beforeStep(stepExecution: StepExecution) {}
+
+    override fun afterStep(stepExecution: StepExecution): ExitStatus? {
+        val jobContext = stepExecution.jobExecution.executionContext
+        jobContext.putLong("processedCount", stepExecution.writeCount.toLong())
+        jobContext.putLong("skipCount", stepExecution.skipCount.toLong())
+        return null  // null 반환 시 기존 ExitStatus 유지
+    }
+}
+```
+
+- `stepExecution.writeCount`, `skipCount`, `readCount` 등은 Spring Batch가 자동 집계하는 값
+- `afterStep`에서 이 값들을 Job ExecutionContext에 복사하면 다른 Step에서 참조 가능
+
+**2. Tasklet 내부에서 ChunkContext를 통해 접근**
+
+```kotlin
+Tasklet { _, chunkContext ->
+    val jobContext = chunkContext.stepContext
+        .stepExecution.jobExecution.executionContext
+    val processedCount = jobContext.getLong("processedCount", 0)
+    val skipCount = jobContext.getLong("skipCount", 0)
+    println("Processed: $processedCount, Skipped: $skipCount")
+    RepeatStatus.FINISHED
+}
+```
+
+### 구현: accountStep → reportStep 데이터 전달
+
+accountStep에서 처리/스킵 건수를 reportStep에서 참조하는 구조이다.
+
+```
+accountStep                              reportStep
+  │                                        │
+  ├── chunk 처리 완료                        ├── Job ExecutionContext에서
+  ├── afterStep에서                         │   "processedCount", "skipCount" 읽기
+  │   Job ExecutionContext에 저장:           │
+  │   "processedCount" = 3                 └── "Processed: 3 Skipped: 1" 출력
+  │   "skipCount" = 1
+  │
+  └── COMPLETED
+```
+
+**AccountStepResultListener 등록 위치:**
+
+```kotlin
+stepBuilderFactory.get("accountStep")
+    .listener(AccountStepResultListener())   // StepExecutionListener → .chunk() 앞에 등록
+    .chunk<Account, Account>(5)
+    .reader(...)
+    ...
+```
+
+StepExecutionListener는 `.chunk()` 앞의 StepBuilder에서 등록한다. 7장 Listener에서 정리한 빌더 체인 규칙과 동일하다.
+
+### 실행 결과 (minBalance=500000)
+
+```
+[InitStep] Starting Batch...
+Chunk: 1 (1건)
+[API Call]: Diana(780,000)
+Chunk: 2~5: Hank(1,200,000) retry 3회 → skip
+Chunk: 6 (1건)
+[API Call]: Karen(540,000)
+Chunk: 7 (1건)
+[API Call]: Paul(890,000)
+[ReportStep] Finished Batch! Processed: 3 Skipped: 1
+```
+
+reportStep이 accountStep의 처리 결과를 Job ExecutionContext를 통해 정확히 참조하고 있다.
+
+### ExecutionContext와 재시작
+
+ExecutionContext는 메타 테이블에 저장되므로, 영속 DB 사용 시 **실패 후 재시작에서도 이전 값이 유지**된다.
+
+```
+1차 실행: accountStep에서 Chunk #48 실패 → FAILED
+  Step ExecutionContext에 현재까지의 처리 위치 기록 → 메타 테이블에 저장
+
+2차 실행: 메타 테이블에서 ExecutionContext 복원 → Chunk #48부터 재시작
+```
+
+H2 인메모리에서는 앱 종료 시 소멸되므로 재시작 기능이 동작하지 않는다 (1장에서 정리한 내용과 동일).
+
+## 9. 남은 학습 주제
 
 ### 실무 적용 전 추가 학습
-
-- [ ] **ExecutionContext** - Step 간 데이터 전달 (예: accountStep 처리 건수를 reportStep에서 참조)
+- [x] **ExecutionContext** - Step 간 데이터 전달 (예: accountStep 처리 건수를 reportStep에서 참조)
 - [ ] **JobParameter 검증** - 필수 파라미터 누락 시 Job 시작 자체를 막기 (JobParametersValidator)
 - [ ] **Partitioning** - 데이터를 파티셔닝해서 병렬 처리 (대량 데이터 성능 최적화)
 - [ ] **테스트 코드 작성** - @SpringBatchTest를 사용한 Job/Step 단위 테스트
