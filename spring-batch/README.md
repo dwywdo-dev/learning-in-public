@@ -779,8 +779,70 @@ fun accountStep(
   Paul     890,000
 ```
 
-## 6. 남은 학습 주제
+## 6. 다중 Step 구성
 
-- [ ] **다중 Step 구성** - 하나의 Job에 여러 Step을 순차/조건부 실행
+하나의 Job에 여러 Step을 조합하여 실행한다.
+
+### 순차 실행
+
+`.start()`와 `.next()`로 Step을 순서대로 연결한다.
+
+```kotlin
+jobBuilderFactory.get("accountJob")
+    .start(initStep)          // 1번째
+    .next(accountStep)        // 2번째
+    .next(reportStep)         // 3번째
+    .build()
+```
+
+```
+실행 흐름:
+  initStep (Tasklet) → accountStep (Chunk) → reportStep (Tasklet)
+```
+
+### 조건부 실행
+
+Step의 ExitStatus에 따라 다음 Step을 분기한다.
+
+```kotlin
+jobBuilderFactory.get("accountJob")
+    .start(initStep)
+    .next(accountStep)
+    .on("COMPLETED").to(reportStep)     // accountStep 성공 → reportStep
+    .from(accountStep)
+    .on("FAILED").to(errorStep)         // accountStep 실패 → errorStep
+    .end()
+    .build()
+```
+
+- `.on("상태")` → ExitStatus가 이 값일 때
+- `.to(스텝)` → 이 Step으로 이동
+- `.from(스텝)` → 같은 Step에서 다른 분기 조건 추가
+- `.end()` → 흐름 정의 종료
+
+```
+실행 흐름:
+  initStep → accountStep ─── COMPLETED → reportStep
+                          └── FAILED    → errorStep
+```
+
+### Step이 FAILED가 되는 조건
+
+Skip/Retry가 설정된 chunk Step에서는, **skipLimit을 초과해야 Step이 FAILED**가 된다. skipLimit 안에서 처리된 실패는 Step 결과에 영향을 주지 않는다.
+
+```
+skipLimit=5, 실패 1건 발생:
+  → 스킵 처리 (skipCount: 1/5)
+  → Step: COMPLETED        ← 실패가 있었지만 skipLimit 이내이므로 성공
+
+skipLimit=0, 실패 1건 발생:
+  → skipLimit 초과 (SkipLimitExceededException)
+  → Step: FAILED           ← 조건부 실행에서 errorStep으로 분기
+```
+
+즉 faultTolerant + skip이 설정되어 있으면, 일정 수준의 실패는 허용되고 Job은 정상 완료된다. skipLimit을 넘어서는 실패가 발생해야 비로소 Step이 FAILED가 되어 에러 분기로 이동한다.
+
+## 7. 남은 학습 주제
+
 - [ ] **Listener** - Job/Step/Chunk 실행 전후에 로직 끼워넣기
 - [ ] **실무 적용** - 실제 비즈니스 DB + 외부 API 연동

@@ -97,15 +97,30 @@ class AccountJobConfig(
             }.build()
 
     @Bean
+    fun errorStep(): Step =
+        stepBuilderFactory
+            .get("errorStep")
+            .tasklet { _, _ ->
+                println("[ErrorStep] Error occurred during Batch!")
+                RepeatStatus.FINISHED
+            }.build()
+
+    @Bean
     fun accountJob(
         initStep: Step,
         accountStep: Step,
         reportStep: Step,
+        errorStep: Step,
     ): Job =
         jobBuilderFactory
             .get("accountJob")
             .start(initStep)
             .next(accountStep)
-            .next(reportStep)
+            .on("COMPLETED")
+            .to(reportStep)
+            .from(accountStep)
+            .on("FAILED")
+            .to(errorStep)
+            .end()
             .build()
 }
