@@ -1,6 +1,7 @@
 package com.example.batch.config
 
 import com.example.batch.domain.Account
+import com.example.batch.exception.ApiCallException
 import org.springframework.batch.core.Job
 import org.springframework.batch.core.Step
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory
@@ -46,12 +47,20 @@ class AccountJobConfig(
         }
 
     @Bean
-    fun accountWriter(): ItemWriter<Account> =
-        ItemWriter { accounts ->
+    fun accountWriter(): ItemWriter<Account> {
+        var chunkCount = 0
+        return ItemWriter { accounts ->
+            chunkCount++
+            println("Chunk: $chunkCount (${accounts.size}건)")
             accounts.forEach { account ->
+                if (account.accountId == 8L) {
+                    println("[API Failure]: $account")
+                    throw ApiCallException("API Call Failure: $account")
+                }
                 println("[API Call]: $account")
             }
         }
+    }
 
     @Bean
     fun accountStep(): Step =
@@ -61,6 +70,11 @@ class AccountJobConfig(
             .reader(accountReader())
             .processor(accountProcessor())
             .writer(accountWriter())
+            .faultTolerant()
+            .retry(ApiCallException::class.java)
+            .retryLimit(3)
+            .skip(ApiCallException::class.java)
+            .skipLimit(5)
             .build()
 
     @Bean
