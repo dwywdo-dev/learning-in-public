@@ -1031,11 +1031,100 @@ ExecutionContext는 메타 테이블에 저장되므로, 영속 DB 사용 시 **
 
 H2 인메모리에서는 앱 종료 시 소멸되므로 재시작 기능이 동작하지 않는다 (1장에서 정리한 내용과 동일).
 
-## 9. 남은 학습 주제
+## 9. JobParameter 검증
+
+필수 파라미터가 누락되거나 유효하지 않을 때, Job 시작 자체를 막는 기능이다.
+
+### 검증이 없을 때의 문제
+
+```
+파라미터 없이 실행:
+  JobLauncher → initStep 실행 → accountStep에서 @Value 변환 실패 → Step FAILED → errorStep
+  → 불필요한 Step 실행 + 긴 스택 트레이스
+```
+
+initStep까지 실행된 후에야 오류가 발생한다. 파라미터 문제는 Job 시작 전에 잡는 것이 맞다.
+
+### JobParametersValidator
+
+`JobParametersValidator` 인터페이스를 구현하고, Job 빌더에 `.validator()`로 등록한다. 검증 실패 시 `JobParametersInvalidException`을 던지면 **Job이 시작되지 않는다**.
+
+```
+검증 추가 후:
+  JobLauncher → validate() → 실패 → JobParametersInvalidException → Job 시작 안 함
+  → Step 실행 없이 즉시 거부
+```
+
+### 구현
+
+```kotlin
+class AccountJobParametersValidator : JobParametersValidator {
+    override fun validate(parameters: JobParameters?) {
+        val minBalanceStr = parameters?.getString("minBalance")
+        val minBalance = minBalanceStr?.toLongOrNull()
+        if (minBalance == null || minBalance < 0) {
+            throw JobParametersInvalidException(
+                "Required parameter 'minBalance' is missing or invalid (must be > 0)"
+            )
+        }
+    }
+}
+```
+
+Job 빌더에 등록:
+
+```kotlin
+jobBuilderFactory.get("accountJob")
+    .validator(AccountJobParametersValidator())
+    .listener(JobLoggingListener())
+    .start(initStep)
+    ...
+```
+
+### 주의: 커맨드라인 파라미터는 String 타입
+
+커맨드라인에서 `minBalance=500000`으로 전달하면 Spring Batch는 이를 **String** 타입으로 저장한다.
+
+```
+minBalance=500000           → String "500000"   (커맨드라인 기본)
+minBalance(long)=500000     → Long 500000       (타입 명시 문법)
+```
+
+따라서 Validator에서 `parameters.getLong()`을 쓰면 `ClassCastException`이 발생한다. `getString()`으로 꺼내서 `toLongOrNull()`로 변환해야 한다. 이 방식은 숫자가 아닌 값(`minBalance=abc`)도 함께 검증할 수 있다.
+
+### Spring Batch 기본 제공 Validator
+
+직접 구현 외에 `DefaultJobParametersValidator`를 사용할 수도 있다:
+
+```kotlin
+DefaultJobParametersValidator(
+    arrayOf("minBalance"),  // requiredKeys - 필수 키
+    arrayOf()               // optionalKeys - 선택 키
+)
+```
+
+단, **키 존재 여부만 체크**하고 값의 유효성(양수인지, 숫자인지 등)은 검증하지 않는다. 값까지 검증해야 하면 직접 구현해야 한다.
+
+### 실행 결과
+
+**파라미터 없이 실행:**
+
+```
+JobParametersInvalidException: Required parameter 'minBalance' is missing or invalid (must be > 0)
+→ Job 시작 전에 차단, Step 실행 없음
+```
+
+**`minBalance=500000`으로 실행:**
+
+```
+검증 통과 → initStep → accountStep (3건 처리, 1건 스킵) → reportStep → COMPLETED
+```
+
+## 10. 남은 학습 주제
 
 ### 실무 적용 전 추가 학습
 - [x] **ExecutionContext** - Step 간 데이터 전달 (예: accountStep 처리 건수를 reportStep에서 참조)
-- [ ] **JobParameter 검증** - 필수 파라미터 누락 시 Job 시작 자체를 막기 (JobParametersValidator)
+- [x] **JobParameter 검증** - 필수 파라미터 누락 시 Job 시작 자체를 막기 (JobParametersValidator)
 - [ ] **Partitioning** - 데이터를 파티셔닝해서 병렬 처리 (대량 데이터 성능 최적화)
 - [ ] **테스트 코드 작성** - @SpringBatchTest를 사용한 Job/Step 단위 테스트
 

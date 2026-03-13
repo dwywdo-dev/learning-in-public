@@ -5,6 +5,7 @@ import com.example.batch.exception.ApiCallException
 import com.example.batch.listener.AccountStepResultListener
 import com.example.batch.listener.JobLoggingListener
 import com.example.batch.listener.SkipLoggingListener
+import com.example.batch.validator.AccountJobParametersValidator
 import org.apache.ibatis.session.SqlSessionFactory
 import org.mybatis.spring.batch.MyBatisPagingItemReader
 import org.mybatis.spring.batch.builder.MyBatisPagingItemReaderBuilder
@@ -122,6 +123,7 @@ class AccountJobConfig(
     ): Job =
         jobBuilderFactory
             .get("accountJob")
+            .validator(AccountJobParametersValidator()) // Or, DefaultJobParametersValidator(arrayOf("minBalance"))
             .listener(JobLoggingListener())
             .start(initStep)
             .next(accountStep)
