@@ -2,6 +2,8 @@ package com.example.batch.config
 
 import com.example.batch.domain.Account
 import com.example.batch.exception.ApiCallException
+import com.example.batch.listener.JobLoggingListener
+import com.example.batch.listener.SkipLoggingListener
 import org.apache.ibatis.session.SqlSessionFactory
 import org.mybatis.spring.batch.MyBatisPagingItemReader
 import org.mybatis.spring.batch.builder.MyBatisPagingItemReaderBuilder
@@ -85,6 +87,7 @@ class AccountJobConfig(
             .retryLimit(3)
             .skip(ApiCallException::class.java)
             .skipLimit(5)
+            .listener(SkipLoggingListener())
             .build()
 
     @Bean
@@ -114,6 +117,7 @@ class AccountJobConfig(
     ): Job =
         jobBuilderFactory
             .get("accountJob")
+            .listener(JobLoggingListener())
             .start(initStep)
             .next(accountStep)
             .on("COMPLETED")

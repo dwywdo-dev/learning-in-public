@@ -842,7 +842,88 @@ skipLimit=0, 실패 1건 발생:
 
 즉 faultTolerant + skip이 설정되어 있으면, 일정 수준의 실패는 허용되고 Job은 정상 완료된다. skipLimit을 넘어서는 실패가 발생해야 비로소 Step이 FAILED가 되어 에러 분기로 이동한다.
 
-## 7. 남은 학습 주제
+## 7. Listener
 
-- [ ] **Listener** - Job/Step/Chunk 실행 전후에 로직 끼워넣기
-- [ ] **실무 적용** - 실제 비즈니스 DB + 외부 API 연동
+Job/Step/Chunk 실행 전후에 로직을 끼워넣는 기능이다.
+
+### Listener 종류
+
+```
+Job 레벨:
+  JobExecutionListener        → Job 시작 전 / 완료 후
+
+Step 레벨:
+  StepExecutionListener       → Step 시작 전 / 완료 후
+  ChunkListener               → Chunk 시작 전 / 완료 후 / 에러 시
+
+아이템 레벨:
+  ItemReadListener            → read 전 / 후 / 에러
+  ItemProcessListener         → process 전 / 후 / 에러
+  ItemWriteListener           → write 전 / 후 / 에러
+
+특수:
+  SkipListener                → skip 발생 시 (read/process/write 각각)
+```
+
+### Listener 등록 위치와 빌더 체인
+
+Step 빌더 체인에서 각 메서드는 **다른 타입의 빌더를 반환**한다. `.listener()` 메서드 이름은 같지만, 빌더 타입에 따라 받을 수 있는 Listener 타입이 다르다.
+
+```
+stepBuilderFactory.get("accountStep")       → StepBuilder
+    .chunk<Account, Account>(5)             → SimpleStepBuilder
+    .reader(...)
+    .processor(...)
+    .writer(...)
+    .faultTolerant()                        → FaultTolerantStepBuilder
+    .retry(...)
+    .skip(...)
+    .listener(SkipLoggingListener())        ← 여기서야 SkipListener 등록 가능
+    .build()
+```
+
+각 빌더의 `.listener()`가 받는 타입:
+
+| 빌더 | `.listener()`가 받는 타입 |
+|---|---|
+| `StepBuilder` | `StepExecutionListener` |
+| `SimpleStepBuilder` | `StepExecutionListener`, `ChunkListener`, `ItemReadListener` 등 |
+| `FaultTolerantStepBuilder` | 위의 전부 + `SkipListener`, `RetryListener` |
+
+`SkipListener`는 skip 기능이 활성화(`faultTolerant()`)되어야 의미가 있으므로, `FaultTolerantStepBuilder`에서만 등록할 수 있다.
+
+**잘못된 위치에 넣으면:**
+
+```kotlin
+// .chunk() 앞에 넣은 경우 - StepBuilder.listener() 호출
+.listener(SkipLoggingListener())   // StepExecutionListener로 취급됨
+.chunk<Account, Account>(5)
+
+// 컴파일은 되지만 SkipListener로 인식되지 않아 skip 이벤트가 전달되지 않음
+```
+
+컴파일 에러가 나지 않아서 찾기 어려운 문제이다. `.listener()` 메서드 이름이 동일하기 때문.
+
+### Listener 등록 위치 요약
+
+| Listener | 등록 위치 |
+|---|---|
+| `JobExecutionListener` | `jobBuilderFactory.get().listener(...)` |
+| `StepExecutionListener` | `.chunk()` 앞의 `.listener(...)` |
+| `SkipListener` | `.faultTolerant()` 이후의 `.listener(...)` |
+
+## 8. 남은 학습 주제
+
+### 실무 적용 전 추가 학습
+
+- [ ] **ExecutionContext** - Step 간 데이터 전달 (예: accountStep 처리 건수를 reportStep에서 참조)
+- [ ] **JobParameter 검증** - 필수 파라미터 누락 시 Job 시작 자체를 막기 (JobParametersValidator)
+- [ ] **Partitioning** - 데이터를 파티셔닝해서 병렬 처리 (대량 데이터 성능 최적화)
+- [ ] **테스트 코드 작성** - @SpringBatchTest를 사용한 Job/Step 단위 테스트
+
+### 실무 적용
+
+- [ ] **실제 DB 연동** - H2 → MySQL/PostgreSQL로 전환, 메타 테이블 분리
+- [ ] **외부 API 연동** - Mock → RestTemplate/WebClient로 실제 호출
+- [ ] **스케줄링** - crontab / Jenkins / @Scheduled 연동
+- [ ] **모니터링** - 실행 이력 조회, 실패 알림
