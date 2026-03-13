@@ -1307,13 +1307,125 @@ Job COMPLETED (47ms)
 
 4개 파티션이 4개 스레드에서 동시 실행되어 partitionStep 전체가 32ms에 완료되었다.
 
-## 11. 남은 학습 주제
+## 11. 테스트 코드 작성
+
+`@SpringBatchTest`를 사용한 Job 단위 테스트이다.
+
+### @SpringBatchTest가 제공하는 Bean
+
+| Bean | 역할 |
+|---|---|
+| `JobLauncherTestUtils` | 테스트에서 Job/Step을 실행 |
+| `JobRepositoryTestUtils` | 테스트 후 메타 테이블 정리 |
+
+### 테스트 클래스 구성
+
+```kotlin
+@SpringBatchTest
+@SpringBootTest(properties = ["spring.batch.job.enabled=false"])
+class AccountJobTest {
+
+    @Autowired
+    lateinit var jobLauncherTestUtils: JobLauncherTestUtils
+
+    @Autowired
+    lateinit var jobRepositoryTestUtils: JobRepositoryTestUtils
+
+    @AfterEach
+    fun cleanup() {
+        jobRepositoryTestUtils.removeJobExecutions()
+    }
+}
+```
+
+### 테스트 케이스
+
+**1. Job 정상 실행**
+
+```kotlin
+@Test
+fun `minBalance 파라미터로 Job 실행 시 COMPLETED`() {
+    val params = JobParametersBuilder()
+        .addString("minBalance", "500000")
+        .toJobParameters()
+
+    val execution = jobLauncherTestUtils.launchJob(params)
+
+    assertThat(execution.status).isEqualTo(BatchStatus.COMPLETED)
+}
+```
+
+**2. 파라미터 검증 실패**
+
+```kotlin
+@Test
+fun `minBalance 파라미터 누락 시 JobParametersInvalidException`() {
+    assertThrows<JobParametersInvalidException> {
+        jobLauncherTestUtils.launchJob(JobParameters())
+    }
+}
+```
+
+**3. 처리 결과 검증 (ExecutionContext)**
+
+```kotlin
+@Test
+fun `Job 실행 후 처리 건수와 스킵 건수 검증`() {
+    val params = JobParametersBuilder()
+        .addString("minBalance", "500000")
+        .toJobParameters()
+
+    val execution = jobLauncherTestUtils.launchJob(params)
+
+    assertThat(execution.executionContext.getLong("processedCount")).isEqualTo(3L)
+    assertThat(execution.executionContext.getLong("skipCount")).isEqualTo(1L)
+}
+```
+
+### 테스트 작성 시 부딪힌 문제들
+
+**1. Job Bean이 여러 개일 때 `NoUniqueBeanDefinitionException`**
+
+`@SpringBatchTest`는 내부적으로 `JobLauncherTestUtils`를 생성하면서 Job Bean을 자동 주입한다. Job이 2개 이상이면 어떤 것을 사용할지 결정할 수 없어서 컨텍스트 로딩이 실패한다.
+
+```
+@SpringBatchTest 내부:
+  JobLauncherTestUtils 생성 → @Autowired setJob(Job job)
+  → Job Bean이 2개 (accountJob, helloJob) → NoUniqueBeanDefinitionException
+```
+
+`JobLauncherTestUtils.setJob()`에 `@Autowired`가 클래스 레벨에 붙어있어서, `@TestConfiguration`으로 Bean을 직접 등록해도 Spring이 다시 `@Autowired`를 호출하면서 같은 문제가 발생한다. Job Bean을 1개로 유지하는 것이 가장 깔끔한 해결책이다.
+
+**2. 컨텍스트 로딩 시 Job 자동 실행**
+
+`@SpringBootTest`는 전체 애플리케이션 컨텍스트를 로딩한다. Spring Batch의 기본 동작은 컨텍스트 로딩 시 등록된 Job을 자동 실행하는 것이므로, 테스트 파라미터 없이 실행되어 Validator가 거부한다.
+
+```
+spring.batch.job.enabled=false
+```
+
+이 설정으로 자동 실행을 막고, 테스트에서 `jobLauncherTestUtils.launchJob(params)`로 명시적으로 실행한다.
+
+**3. 같은 파라미터로 여러 테스트 실행 시 `JobInstanceAlreadyCompleteException`**
+
+5장에서 학습한 중복 실행 방지가 테스트에서도 동작한다. 같은 파라미터(`minBalance=500000`)로 Job을 실행한 뒤 COMPLETED로 기록되면, 다음 테스트에서 같은 파라미터로 실행 시 거부된다.
+
+```kotlin
+@AfterEach
+fun cleanup() {
+    jobRepositoryTestUtils.removeJobExecutions()  // 메타 테이블 정리
+}
+```
+
+`@SpringBatchTest`가 제공하는 `JobRepositoryTestUtils`로 테스트 간 실행 이력을 정리한다.
+
+## 12. 남은 학습 주제
 
 ### 실무 적용 전 추가 학습
 - [x] **ExecutionContext** - Step 간 데이터 전달 (예: accountStep 처리 건수를 reportStep에서 참조)
 - [x] **JobParameter 검증** - 필수 파라미터 누락 시 Job 시작 자체를 막기 (JobParametersValidator)
 - [x] **Partitioning** - 데이터를 파티셔닝해서 병렬 처리 (대량 데이터 성능 최적화)
-- [ ] **테스트 코드 작성** - @SpringBatchTest를 사용한 Job/Step 단위 테스트
+- [x] **테스트 코드 작성** - @SpringBatchTest를 사용한 Job/Step 단위 테스트
 
 ### 실무 적용
 
