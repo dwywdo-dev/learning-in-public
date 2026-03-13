@@ -12,6 +12,7 @@ import org.springframework.batch.core.configuration.annotation.StepBuilderFactor
 import org.springframework.batch.core.configuration.annotation.StepScope
 import org.springframework.batch.item.ItemProcessor
 import org.springframework.batch.item.ItemWriter
+import org.springframework.batch.repeat.RepeatStatus
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -59,6 +60,15 @@ class AccountJobConfig(
     }
 
     @Bean
+    fun initStep(): Step =
+        stepBuilderFactory
+            .get("initStep")
+            .tasklet { _, _ ->
+                println("[InitStep] Starting Batch...")
+                RepeatStatus.FINISHED
+            }.build()
+
+    @Bean
     fun accountStep(
         accountReader: MyBatisPagingItemReader<Account>,
         accountProcessor: ItemProcessor<Account, Account>,
@@ -78,9 +88,24 @@ class AccountJobConfig(
             .build()
 
     @Bean
-    fun accountJob(accountStep: Step): Job =
+    fun reportStep(): Step =
+        stepBuilderFactory
+            .get("reportStep")
+            .tasklet { _, _ ->
+                println("[ReportStep] Finished Batch!")
+                RepeatStatus.FINISHED
+            }.build()
+
+    @Bean
+    fun accountJob(
+        initStep: Step,
+        accountStep: Step,
+        reportStep: Step,
+    ): Job =
         jobBuilderFactory
             .get("accountJob")
-            .start(accountStep)
+            .start(initStep)
+            .next(accountStep)
+            .next(reportStep)
             .build()
 }

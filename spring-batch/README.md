@@ -700,6 +700,47 @@ fun accountProcessor(
 - `@StepScope`: Bean 생성 시점을 Step 실행 시로 지연. 이래야 `jobParameters`를 읽을 수 있음
 - `#{jobParameters['minBalance']}`: SpEL 표현식으로 Job Parameter에서 값을 꺼냄
 
+**`@StepScope`가 왜 필요한가 - Bean 생성 시점 문제**
+
+```
+@StepScope 없을 때 (일반 Bean):
+
+  앱 기동 시:
+    Spring 컨텍스트 초기화
+      ├── accountReader Bean 생성
+      ├── accountProcessor Bean 생성  ← 이 시점에 @Value 해석
+      ├── accountWriter Bean 생성     ← 그런데 jobParameters가 아직 없음!
+      ├── accountStep Bean 생성
+      └── accountJob Bean 생성
+    앱 기동 완료
+      ↓
+    JobLauncher가 Job 실행 (minBalance=500000)  ← 여기서야 jobParameters 결정
+
+  → Bean 생성 시점에 jobParameters가 없으므로 @Value 해석 실패
+```
+
+```
+@StepScope 있을 때:
+
+  앱 기동 시:
+    Spring 컨텍스트 초기화
+      ├── accountReader Bean 생성
+      ├── accountProcessor → @StepScope 발견 → 프록시(껍데기)만 생성
+      ├── accountWriter Bean 생성
+      ├── accountStep Bean 생성 (processor 자리에 프록시가 들어감)
+      └── accountJob Bean 생성
+    앱 기동 완료
+      ↓
+    JobLauncher가 Job 실행 (minBalance=500000)
+      ↓
+    accountStep 실행 시작
+      ↓
+    프록시가 진짜 accountProcessor Bean 생성  ← 이제 jobParameters가 있음!
+      @Value("#{jobParameters['minBalance']}") → 500000 주입 성공
+```
+
+프록시는 `ItemProcessor` 인터페이스를 구현하고 있어서 Step 입장에서는 진짜 객체인지 프록시인지 구분할 필요가 없다. 실제 `process()` 호출 시 프록시가 내부의 진짜 객체로 위임한다.
+
 **2. `@StepScope` Bean을 Step에서 주입받기**
 
 `@StepScope` Bean은 생성 시 jobParameters가 필요하므로, 직접 메서드 호출 대신 Bean 주입 방식을 사용해야 한다.
