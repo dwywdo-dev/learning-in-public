@@ -8,4 +8,12 @@
         ORDER BY account_id
         LIMIT #{_pagesize} OFFSET #{_skiprows}
     </select>
+
+    <select id="findAccountsByRange" resultType="com.example.batch.domain.Account">
+        SELECT account_id, name, status, balance, created_at
+        FROM accounts
+        WHERE account_id BETWEEN #{minId} AND #{maxId}
+        ORDER BY account_id
+        LIMIT #{_pagesize} OFFSET #{_skiprows}
+    </select>
 </mapper>

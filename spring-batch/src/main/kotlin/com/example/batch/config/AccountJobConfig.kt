@@ -5,6 +5,7 @@ import com.example.batch.exception.ApiCallException
 import com.example.batch.listener.AccountStepResultListener
 import com.example.batch.listener.JobLoggingListener
 import com.example.batch.listener.SkipLoggingListener
+import com.example.batch.partition.AccountPartitioner
 import com.example.batch.validator.AccountJobParametersValidator
 import org.apache.ibatis.session.SqlSessionFactory
 import org.mybatis.spring.batch.MyBatisPagingItemReader
@@ -20,12 +21,28 @@ import org.springframework.batch.repeat.RepeatStatus
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.core.task.SimpleAsyncTaskExecutor
+import javax.sql.DataSource
 
 @Configuration
 class AccountJobConfig(
     private val jobBuilderFactory: JobBuilderFactory,
     private val stepBuilderFactory: StepBuilderFactory,
 ) {
+    @Bean
+    @StepScope
+    fun partitionReader(
+        sqlSessionFactory: SqlSessionFactory,
+        @Value("#{stepExecutionContext['minId']}") minId: Long,
+        @Value("#{stepExecutionContext['maxId']}") maxId: Long,
+    ): MyBatisPagingItemReader<Account> =
+        MyBatisPagingItemReaderBuilder<Account>()
+            .sqlSessionFactory(sqlSessionFactory)
+            .queryId("com.example.batch.mapper.AccountMapper.findAccountsByRange")
+            .parameterValues(mapOf("minId" to minId, "maxId" to maxId))
+            .pageSize(5)
+            .build()
+
     @Bean
     fun accountReader(sqlSessionFactory: SqlSessionFactory): MyBatisPagingItemReader<Account> =
         MyBatisPagingItemReaderBuilder<Account>()
@@ -74,7 +91,7 @@ class AccountJobConfig(
 
     @Bean
     fun accountStep(
-        accountReader: MyBatisPagingItemReader<Account>,
+        partitionReader: MyBatisPagingItemReader<Account>,
         accountProcessor: ItemProcessor<Account, Account>,
         accountWriter: ItemWriter<Account>,
     ): Step =
@@ -82,7 +99,7 @@ class AccountJobConfig(
             .get("accountStep")
             .listener(AccountStepResultListener())
             .chunk<Account, Account>(5)
-            .reader(accountReader)
+            .reader(partitionReader)
             .processor(accountProcessor)
             .writer(accountWriter)
             .faultTolerant()
@@ -115,9 +132,23 @@ class AccountJobConfig(
             }.build()
 
     @Bean
+    fun partitionStep(
+        accountStep: Step,
+        dataSource: DataSource,
+    ): Step =
+        stepBuilderFactory
+            .get("partitionStep")
+            .partitioner("accountStep", AccountPartitioner(dataSource))
+            .step(accountStep)
+            .gridSize(4)
+            .taskExecutor(SimpleAsyncTaskExecutor())
+            .build()
+
+    @Bean
     fun accountJob(
         initStep: Step,
         accountStep: Step,
+        partitionStep: Step,
         reportStep: Step,
         errorStep: Step,
     ): Job =
@@ -126,10 +157,10 @@ class AccountJobConfig(
             .validator(AccountJobParametersValidator()) // Or, DefaultJobParametersValidator(arrayOf("minBalance"))
             .listener(JobLoggingListener())
             .start(initStep)
-            .next(accountStep)
+            .next(partitionStep)
             .on("COMPLETED")
             .to(reportStep)
-            .from(accountStep)
+            .from(partitionStep)
             .on("FAILED")
             .to(errorStep)
             .end()

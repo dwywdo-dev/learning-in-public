@@ -1120,12 +1120,199 @@ JobParametersInvalidException: Required parameter 'minBalance' is missing or inv
 검증 통과 → initStep → accountStep (3건 처리, 1건 스킵) → reportStep → COMPLETED
 ```
 
-## 10. 남은 학습 주제
+## 10. Partitioning
+
+데이터를 분할하여 여러 Step 인스턴스가 병렬 처리하는 방식이다. 2장에서 정리한 병렬 처리 레벨 3에 해당한다.
+
+### Multi-threaded Step과의 차이
+
+| | Multi-threaded Step | Partitioning |
+|---|---|---|
+| Reader 공유 | 1개 공유 (thread-safe 필요) | 파티션마다 독립 (thread-safety 불필요) |
+| 데이터 분할 | Spring Batch가 read()로 분배 | 개발자가 Partitioner로 명시적 분할 |
+| 재시작 | 어려움 (어디까지 읽었는지 추적 불가) | 가능 (파티션별 StepExecution 별도 기록) |
+
+### 구조 변화
+
+**이전 (단일 Step):**
+
+```
+Job → initStep → accountStep (싱글 스레드) → reportStep
+                   │
+                   Reader 1개가 20건을 순서대로 처리
+                   Chunk #1 끝나야 #2 시작
+```
+
+**현재 (Partitioning):**
+
+```
+Job → initStep → partitionStep (ManagerStep) → reportStep
+                   │
+                   ├── Partitioner: id 범위 분할
+                   │
+                   ├── [cTaskExecutor-1] accountStep:partition0 (id 1~6)
+                   ├── [cTaskExecutor-2] accountStep:partition1 (id 7~12)
+                   ├── [cTaskExecutor-3] accountStep:partition2 (id 13~18)
+                   └── [cTaskExecutor-4] accountStep:partition3 (id 19~20)
+                         각 파티션마다 독립된 Reader/Processor/Writer
+                         4개 동시 실행
+```
+
+### 구성 요소
+
+| 컴포넌트 | 역할 |
+|---|---|
+| `partitionStep` | ManagerStep. 파티션 분배 + 완료 대기 |
+| `AccountPartitioner` | DB에서 id 범위 조회 → 파티션별 범위 계산 |
+| `partitionReader` (`@StepScope`) | 자기 파티션의 minId~maxId 범위만 읽음 |
+| `SimpleAsyncTaskExecutor` | 파티션마다 별도 스레드 생성 |
+
+### Partitioner 구현
+
+```kotlin
+class AccountPartitioner(
+    private val dataSource: DataSource,
+) : Partitioner {
+    override fun partition(gridSize: Int): Map<String, ExecutionContext> {
+        val (minId, maxId) = JdbcTemplate(dataSource).queryForObject(
+            "SELECT MIN(account_id), MAX(account_id) FROM accounts"
+        ) { rs, _ -> rs.getLong(1) to rs.getLong(2) }!!
+
+        val partitionSize = (maxId - minId + 1) / gridSize + 1
+        val partitions = mutableMapOf<String, ExecutionContext>()
+
+        for (i in 0 until gridSize) {
+            val context = ExecutionContext()
+            context.putLong("minId", minId + i * partitionSize)
+            context.putLong("maxId", minOf(minId + (i + 1) * partitionSize, maxId))
+            partitions["partition$i"] = context
+        }
+
+        return partitions
+    }
+}
+```
+
+- `gridSize`: 파티션 개수 (PartitionHandler에서 지정)
+- 반환값: 파티션 이름 → ExecutionContext 맵. 각 ExecutionContext에 `minId`, `maxId`를 넣어서 WorkerStep이 자기 범위만 읽을 수 있게 한다
+
+### minId/maxId가 Reader에 전달되는 흐름
+
+```
+Partitioner                 → ExecutionContext에 넣음        (minId, maxId)
+  ↓
+Spring Batch                → StepExecution에 연결           (stepExecutionContext)
+  ↓
+@StepScope + @Value         → Reader Bean 생성 시 주입       (parameterValues)
+  ↓
+MyBatis                     → SQL의 #{minId}, #{maxId}에 바인딩
+```
+
+5장에서 `jobParameters`를 `@StepScope` + `@Value`로 주입한 것과 같은 원리이다. 읽는 위치만 다르다:
+
+```kotlin
+// Job Parameter 주입 (5장)
+@Value("#{jobParameters['minBalance']}") minBalance: Long
+
+// Step ExecutionContext 주입 (Partitioning)
+@Value("#{stepExecutionContext['minId']}") minId: Long
+```
+
+### Reader: @StepScope + parameterValues
+
+```kotlin
+@Bean
+@StepScope
+fun partitionReader(
+    sqlSessionFactory: SqlSessionFactory,
+    @Value("#{stepExecutionContext['minId']}") minId: Long,
+    @Value("#{stepExecutionContext['maxId']}") maxId: Long,
+): MyBatisPagingItemReader<Account> =
+    MyBatisPagingItemReaderBuilder<Account>()
+        .sqlSessionFactory(sqlSessionFactory)
+        .queryId("com.example.batch.mapper.AccountMapper.findAccountsByRange")
+        .parameterValues(mapOf("minId" to minId, "maxId" to maxId))
+        .pageSize(5)
+        .build()
+```
+
+`@StepScope` 덕분에 파티션마다 독립된 Reader 인스턴스가 생성되고, 각 파티션의 ExecutionContext에서 `minId`/`maxId`가 주입된다.
+
+### Mapper XML: 범위 조회 쿼리
+
+```xml
+<select id="findAccountsByRange" resultType="com.example.batch.domain.Account">
+    SELECT account_id, name, status, balance, created_at
+    FROM accounts
+    WHERE account_id BETWEEN #{minId} AND #{maxId}
+    ORDER BY account_id
+    LIMIT #{_pagesize} OFFSET #{_skiprows}
+</select>
+```
+
+### ManagerStep + WorkerStep 구성
+
+```kotlin
+@Bean
+fun partitionStep(
+    accountStep: Step,
+    dataSource: DataSource,
+): Step =
+    stepBuilderFactory.get("partitionStep")
+        .partitioner("accountStep", AccountPartitioner(dataSource))
+        .step(accountStep)          // WorkerStep으로 기존 accountStep 사용
+        .gridSize(4)                // 4개 파티션
+        .taskExecutor(SimpleAsyncTaskExecutor())
+        .build()
+```
+
+### 병렬 실행 시 ExecutionContext 주의점
+
+8장에서 만든 `AccountStepResultListener`는 원래 단순 덮어쓰기(`putLong`)였다. Partitioning 도입 후에는 4개 파티션이 병렬로 `afterStep`을 실행하므로, 마지막에 쓴 파티션의 값만 남는 문제가 발생했다.
+
+```
+partition0: putLong("processedCount", 1)   ← Diana
+partition1: putLong("processedCount", 0)   ← Hank 스킵
+partition2: putLong("processedCount", 1)   ← Karen
+partition3: putLong("processedCount", 1)   ← Paul
+→ 마지막에 쓴 값만 남음: processedCount = ?  (비결정적)
+```
+
+해결: `synchronized` + 누적 방식으로 변경했다.
+
+```kotlin
+override fun afterStep(stepExecution: StepExecution): ExitStatus? {
+    val jobContext = stepExecution.jobExecution.executionContext
+    synchronized(jobContext) {
+        val prev = jobContext.getLong("processedCount", 0)
+        jobContext.putLong("processedCount", prev + stepExecution.writeCount.toLong())
+        val prevSkip = jobContext.getLong("skipCount", 0)
+        jobContext.putLong("skipCount", prevSkip + stepExecution.skipCount.toLong())
+    }
+    return null
+}
+```
+
+### 실행 결과 (minBalance=500000, gridSize=4)
+
+```
+[InitStep] Starting Batch...
+[cTaskExecutor-1] accountStep:partition0 (id 1~6):   Diana(780K)  → 처리
+[cTaskExecutor-2] accountStep:partition3 (id 19~20): Paul(890K)   → 처리
+[cTaskExecutor-3] accountStep:partition2 (id 13~18): Karen(540K)  → 처리
+[cTaskExecutor-4] accountStep:partition1 (id 7~12):  Hank(1.2M)   → retry 3회 → skip
+[ReportStep] Finished Batch! Processed: 3 Skipped: 1
+Job COMPLETED (47ms)
+```
+
+4개 파티션이 4개 스레드에서 동시 실행되어 partitionStep 전체가 32ms에 완료되었다.
+
+## 11. 남은 학습 주제
 
 ### 실무 적용 전 추가 학습
 - [x] **ExecutionContext** - Step 간 데이터 전달 (예: accountStep 처리 건수를 reportStep에서 참조)
 - [x] **JobParameter 검증** - 필수 파라미터 누락 시 Job 시작 자체를 막기 (JobParametersValidator)
-- [ ] **Partitioning** - 데이터를 파티셔닝해서 병렬 처리 (대량 데이터 성능 최적화)
+- [x] **Partitioning** - 데이터를 파티셔닝해서 병렬 처리 (대량 데이터 성능 최적화)
 - [ ] **테스트 코드 작성** - @SpringBatchTest를 사용한 Job/Step 단위 테스트
 
 ### 실무 적용

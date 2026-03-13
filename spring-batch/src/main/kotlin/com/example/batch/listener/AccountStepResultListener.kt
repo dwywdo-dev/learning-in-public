@@ -10,8 +10,12 @@ class AccountStepResultListener : StepExecutionListener {
 
     override fun afterStep(stepExecution: StepExecution): ExitStatus? {
         val jobContext = stepExecution.jobExecution.executionContext
-        jobContext.putLong("processedCount", stepExecution.writeCount.toLong())
-        jobContext.putLong("skipCount", stepExecution.skipCount.toLong())
+        synchronized(jobContext) {
+            val prev = jobContext.getLong("processedCount", 0)
+            jobContext.putLong("processedCount", prev + stepExecution.writeCount.toLong())
+            val prevSkip = jobContext.getLong("skipCount", 0)
+            jobContext.putLong("skipCount", prevSkip + stepExecution.skipCount.toLong())
+        }
         return null
     }
 }
