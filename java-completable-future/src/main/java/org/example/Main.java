@@ -4,9 +4,7 @@ import java.util.concurrent.*;
 
 public class Main {
     public static void main(String[] args) {
-        CompletableFuture<String> result = buildUserSummary();
-
-        System.out.println(result.join());
+        SequencePractice.run();
     }
 
     static CompletableFuture<String> buildUserSummary() {
