@@ -13,10 +13,11 @@ public class SlidingWindowPractice {
             .boxed()
             .toList();
 
-        CompletableFuture<List<String>> result = processWithLimit(
+        CompletableFuture<List<String>> result = processWithLimitFallback(
             inputs,
             3,
-            SlidingWindowPractice::callAsync
+            SlidingWindowPractice::callMaybeFailAsync,
+            "FAILED"
         );
 
         System.out.println(result.join());
@@ -38,6 +39,22 @@ public class SlidingWindowPractice {
         Coordinator<T, R> coordinator =
             new Coordinator<>(inputs, limit, asyncMapper);
         return coordinator.start();
+    }
+
+    static <T, R> CompletableFuture<List<R>> processWithLimitFallback(
+        List<T> inputs,
+        int limit,
+        Function<T, CompletableFuture<R>> asyncMapper,
+        R fallback
+    ) {
+        return processWithLimit(inputs, limit, input -> {
+            try {
+                return asyncMapper.apply(input)
+                    .exceptionally(ex -> fallback);
+            } catch (Throwable ex) {
+                return CompletableFuture.completedFuture(fallback);
+            }
+        });
     }
 
     static final class Coordinator<T, R> {
@@ -118,6 +135,21 @@ public class SlidingWindowPractice {
         return CompletableFuture.supplyAsync(() -> {
             log("start " + input);
             sleep(delayMillis(input));
+            log("end " + input);
+            return "result-" + input;
+        });
+    }
+
+    static CompletableFuture<String> callMaybeFailAsync(Integer input) {
+        return CompletableFuture.supplyAsync(() -> {
+            log("start " + input);
+            sleep(delayMillis(input));
+
+            if (input == 3 || input == 7) {
+                log("fail " + input);
+                throw new RuntimeException("failed " + input);
+            }
+
             log("end " + input);
             return "result-" + input;
         });
