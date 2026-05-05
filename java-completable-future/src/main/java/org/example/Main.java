@@ -4,7 +4,7 @@ import java.util.concurrent.*;
 
 public class Main {
     public static void main(String[] args) {
-        SlidingWindowPractice.run();
+        RetryPractice.run();
     }
 
     static CompletableFuture<String> buildUserSummary() {
